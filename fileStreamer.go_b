@@ -1,0 +1,214 @@
+package filestreamer
+
+import (
+	"bufio"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+)
+
+type TcpServer struct {
+	Addr                string
+	tnxContext          tnxContext
+	masterhandercontext handlerContext
+	datahandercontexts  map[int]handlerContext
+}
+
+type tnxContext struct {
+	Serveraddr      string
+	ClientIP        string
+	dataconnections int
+	chunckSize      int
+	sourceFile      string
+	destinationFile string
+}
+
+type cmd int
+
+const (
+	done = iota
+)
+
+type handlerContext struct {
+	cmdchan  chan cmd
+	datachan chan []byte
+}
+
+func (s *TcpServer) init() {
+	s.datahandercontexts = make(map[int]handlerContext)
+}
+
+func (s *TcpServer) Listen() {
+	lstner, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		panic(fmt.Sprintf("unable to create lstner \n %s", err.Error()))
+	}
+	defer lstner.Close()
+	const (
+		waitingforMasterConnection = iota
+		waitingforDataConnections
+	)
+	state := waitingforMasterConnection
+	dataconnectioncreated := int(0)
+	for {
+		switch state {
+		case waitingforMasterConnection:
+			fmt.Println("waiting for master connection")
+			conn, err0 := lstner.Accept()
+			if err0 != nil {
+				fmt.Printf("unable to accept a master connection request \n %s \n", err0.Error())
+			} else {
+				err := s.setconfigformremote(conn)
+				if err != nil {
+					fmt.Printf("unable to set extract and set config values from conn \n %s \n", err.Error())
+					conn.Close()
+				} else {
+					hc := s.createHandler("masterhander0", conn)
+					s.masterhandercontext = hc
+					state = waitingforDataConnections
+				}
+			}
+		case waitingforDataConnections:
+			fmt.Printf("waiting for data connections , connections created till now : %d \n", dataconnectioncreated)
+			conn, err := lstner.Accept()
+			if err != nil {
+				fmt.Printf("unable to accept data connection : %d \n", dataconnectioncreated+1)
+			} else {
+				hc := s.createHandler(fmt.Sprintf("data connection : %d", dataconnectioncreated), conn)
+				s.datahandercontexts[dataconnectioncreated] = hc
+				dataconnectioncreated += 1
+				if dataconnectioncreated == s.tnxContext.dataconnections-1 {
+					fmt.Println("acquired all data channels ")
+				}
+				err := s.transferfile()
+				if err != nil {
+					fmt.Errorf("failed transfer file %w", err)
+				} else {
+					s.masterhandercontext.datachan <- []byte("transfer completed ")
+					s.masterhandercontext.cmdchan <- done
+					fmt.Println("file transfer completed ")
+				}
+				s.publishDone()
+			}
+			state = waitingforMasterConnection
+		}
+	}
+}
+
+func (s *TcpServer) setconfigformremote(conn net.Conn) error {
+	lengthbuff := make([]byte, 8)
+	_, err := conn.Read(lengthbuff)
+	if err != nil {
+		return fmt.Errorf("unable to read length of data from conn :: %w", err)
+	}
+	length := bytesToInt64(lengthbuff)
+	data := make([]byte, length)
+	n, err := conn.Read(data)
+	if err != nil {
+		return fmt.Errorf("unable to read data of length - %d : %w", length, err)
+	}
+	if int64(n) != length {
+		return fmt.Errorf("length mismatch expected length is %d but got %d ", n, length)
+	}
+	var config tnxContext
+	jperr := json.Unmarshal(data, &config)
+	if jperr != nil {
+		return fmt.Errorf("unable to parse config from data %w", jperr)
+	}
+	s.tnxContext = config
+
+	return nil
+
+}
+
+func (s *TcpServer) sendConfigtoremote() error {
+
+}
+
+func (s *TcpServer) createHandler(id string, conn net.Conn) handlerContext {
+	cmdchan := make(chan cmd)
+	datachan := make(chan []byte)
+	hc := handlerContext{
+		cmdchan:  cmdchan,
+		datachan: datachan,
+	}
+	go s.connHandler(id, conn, hc)
+	return hc
+
+}
+
+func (s *TcpServer) connHandler(id string, conn net.Conn, hc handlerContext) {
+	fmt.Printf("strating connHandler %s \n", id)
+	for {
+		select {
+		case cmd := <-hc.cmdchan:
+			switch cmd {
+			case done:
+				fmt.Printf("got kill command from handler id : %s \n", id)
+				return
+			}
+		default:
+			select {
+			case data := <-hc.datachan:
+				conn.Write(data)
+			}
+		}
+	}
+}
+
+func int64ToBytes(n int64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(n))
+	return buf
+}
+
+func bytesToInt64(b []byte) int64 {
+	if len(b) < 8 {
+		panic("byte slice too short for int64")
+	}
+	return int64(binary.BigEndian.Uint64(b))
+}
+
+func (s *TcpServer) publishDone() {
+	for _, hc := range s.datahandercontexts {
+		hc.cmdchan <- done
+	}
+}
+
+func (s *TcpServer) transferfile() error {
+	_, err := os.Stat(s.tnxContext.sourceFile)
+	if err != nil {
+		return fmt.Errorf("file issuse %w", err)
+	}
+	file, err := os.Open(s.tnxContext.sourceFile)
+	if err != nil {
+		return fmt.Errorf("unable to open file %w", err)
+	}
+	defer file.Close()
+	filereader := bufio.NewReaderSize(file, 2*s.tnxContext.chunckSize)
+	isfilecompleted := false
+	for {
+		for i := int(0); i < s.tnxContext.dataconnections; i++ {
+			datachunk := make([]byte, s.tnxContext.chunckSize)
+			_, err := filereader.Read(datachunk)
+			if err != nil {
+				if err == io.EOF {
+					isfilecompleted = true
+				} else {
+					return fmt.Errorf("error occcured while read file %w", err)
+				}
+			}
+			s.datahandercontexts[i].datachan <- datachunk
+			if isfilecompleted {
+				return nil
+			}
+		}
+	}
+}
+
+func (s *TcpServer) send(tnxhc tnxContext) error {
+
+}
