@@ -1,8 +1,6 @@
 #file streamer in go 
 
 
-<video width="600" controls>
-  <source src="./demo.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
-
+<div align="center">
+  <img src="./demo.gif" alt="Architecture Diagrams" width =400 height =400>
+</div>
