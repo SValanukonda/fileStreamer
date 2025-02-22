@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"time"
 )
 
 type Server struct {
@@ -53,7 +54,7 @@ func (s *Server) filewriter() {
 				return
 
 			}
-			fmt.Println(i, data, string(data))
+			//fmt.Println(i, data, string(data))
 			_, err := file.Write(data)
 			if err != nil {
 				panic(fmt.Errorf("unable to write into a file \n %w", err))
@@ -70,7 +71,7 @@ func (s *Server) fileRcvHandler(id int, conn net.Conn, chn chan []byte) {
 	for {
 		data := make([]byte, chunk)
 		n, err := io.ReadFull(conreader, data)
-		fmt.Printf("data received in file rcv handler %d: %s \n", id, string(data))
+		//fmt.Printf("data received in file rcv handler %d: %s \n", id, string(data))
 		if err != nil {
 			if err == io.ErrUnexpectedEOF {
 				iscompleted = true
@@ -104,20 +105,33 @@ func (s *Server) send() {
 	file, _ := os.Open(infile)
 	filereader := bufio.NewReaderSize(file, 2*chunk)
 	readcompleted := false
+	chanclosed := make(map[int]bool)
+	closedchans := 0
+	for i := 0; i < parallelpage; i++ {
+		chanclosed[i] = false
+	}
 	for {
 		for i := 0; i < parallelpage; i++ {
+			if readcompleted == true && chanclosed[i] == false {
+				closedchans += 1
+				close(s.handlerChans[i])
+				chanclosed[i] = true
+				continue
+			}
 			data := make([]byte, chunk)
 			n, err := io.ReadFull(filereader, data)
-			fmt.Println(i, data, string(data))
+			//fmt.Println(i, data, string(data))
 			if err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					readcompleted = true
 				}
 			}
 			s.handlerChans[i] <- data[:n]
-			if readcompleted {
-				return
-			}
+
+		}
+		if closedchans == parallelpage {
+			time.Sleep(time.Minute)
+			return
 		}
 	}
 }
