@@ -7,13 +7,13 @@
 </div>
 
 ## overview
-This project implements a parallel file streaming in go using multiple tcp connnection between client and server , sender reads a large file in chunks and sends them in parallel to client , __synchrouszation is achieved by used mathematical mod which also acts like load balenced of tcp connections__ receiver side or client side 
+This project implements a parallel file streaming in go using multiple tcp connnection between client and server , sender reads a large file in chunks and sends them in parallel to client , __synchrouszation is achieved by used mathematical mod which also acts like load balenced of tcp connections__ receiver side or client side . this will faster when sharing large files , but uses high network bandwith 
 
 
 ## synchrozing chunks/packets between client and server 
 
 file is read is chunck and each chunk will be sent to connection with  equation 
 
-$$
+```
   connection id = (chunk id ) mod total connections 
-$$
+```

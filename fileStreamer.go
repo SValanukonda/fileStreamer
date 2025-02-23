@@ -6,142 +6,175 @@ import (
 	"io"
 	"net"
 	"os"
-	"time"
+	"sync"
 )
-
-type Server struct {
-	addr         string
-	handlerChans map[int]chan []byte
-}
 
 const infile = "./in.txt"
 const outfile = "./out.txt"
-const parallelpage = 10
-const chunk = 5
+const parallelpage = 1
+const chunk = 500 * 1024 * 1024
 
-func (s *Server) Listen() {
-	fmt.Println("started listening ")
-	s.handlerChans = make(map[int]chan []byte)
+type TcpServer struct {
+	addr         string
+	datachannels map[int]*dataChannel
+	synContext   *synContext
+}
+
+type dataChannel struct {
+	fromaddr string
+	isclosed bool
+	channel  chan []byte
+}
+
+type synContext struct {
+	wg    sync.WaitGroup
+	mutex sync.Mutex
+}
+
+func (s *TcpServer) ListenForTransfer() error {
+	fmt.Println("listening for file transfer ")
 	ln, err := net.Listen("tcp", s.addr)
+	s.synContext = &synContext{}
+	s.datachannels = make(map[int]*dataChannel)
 	if err != nil {
-		panic(fmt.Errorf("failed to listen to add : %s \n %w", s.addr, err))
+		return fmt.Errorf("unable to create listner : %w", err)
 	}
-
 	for i := 0; i < parallelpage; i++ {
 		conn, err := ln.Accept()
 		if err != nil {
-			panic(fmt.Errorf("unable to accept %d th connection \n %w", i, err))
+			return fmt.Errorf("unable to accept connnection id :%d \n %w", i, err)
 		}
-		chn := make(chan []byte)
-		s.handlerChans[i] = chn
-		go s.fileRcvHandler(i, conn, chn)
+		s.synContext.wg.Add(1)
+		s.datachannels[i] = &dataChannel{
+			fromaddr: conn.RemoteAddr().String(),
+			isclosed: false,
+			channel:  make(chan []byte),
+		}
+		go s.recvHandler(i, conn, s.datachannels[i])
 	}
-	s.filewriter()
+	errf := s.fileWriter()
+	fmt.Printf("awaiting ")
+	s.synContext.wg.Wait()
+	return errf
 }
 
-func (s *Server) filewriter() {
+func (s *TcpServer) recvHandler(id int, conn net.Conn, dataChnl *dataChannel) {
+	fmt.Printf("starting recvHanlder id : %d\n", id)
+	defer s.synContext.wg.Done()
+	buffConn := bufio.NewReaderSize(conn, 2*chunk)
+	for {
+		if dataChnl.isclosed {
+			fmt.Printf("channel closed for recv handler id : %d \n", id)
+			return
+		}
+		data := make([]byte, chunk)
+		n, err := io.ReadFull(buffConn, data)
+		if err != nil && err != io.ErrUnexpectedEOF {
+			if err == io.EOF {
+				dataChnl.isclosed = true
+				close(dataChnl.channel)
+				fmt.Printf("channel closed for id : %d \n", id)
+				if err == io.EOF {
+					return
+				}
+			} else {
+				panic(fmt.Errorf("unable to read data from buffered connection for id : %d \n %w", id, err))
+			}
+		}
+		dataChnl.channel <- data[:n]
+		if err == io.ErrUnexpectedEOF {
+			dataChnl.isclosed = true
+
+		}
+
+	}
+
+}
+
+func (s *TcpServer) fileWriter() error {
 	fmt.Println("starting file writer process ")
 	file, err := os.Create(outfile)
 	if err != nil {
-		panic(fmt.Errorf("unable to open file for writing \n %w", err))
+		return fmt.Errorf("unable to open file for writing \n %w", err)
 	}
-
 	for {
+		openchans := parallelpage
 		for i := 0; i < parallelpage; i++ {
-			data, ok := <-s.handlerChans[i]
-			if !ok {
-				fmt.Printf("channel got closed for channel : %d ;; %s\n", i, string(data))
-				return
-
-			}
-			//fmt.Println(i, data, string(data))
-			_, err := file.Write(data)
-			if err != nil {
-				panic(fmt.Errorf("unable to write into a file \n %w", err))
-			}
-
-		}
-	}
-}
-
-func (s *Server) fileRcvHandler(id int, conn net.Conn, chn chan []byte) {
-	fmt.Printf("starting fileRcvHandler id : %d \n", id)
-	iscompleted := false
-	conreader := bufio.NewReaderSize(conn, 2*chunk)
-	for {
-		data := make([]byte, chunk)
-		n, err := io.ReadFull(conreader, data)
-		//fmt.Printf("data received in file rcv handler %d: %s \n", id, string(data))
-		if err != nil {
-			if err == io.ErrUnexpectedEOF {
-				iscompleted = true
-			} else if err == io.EOF {
-				fmt.Printf("got connection close for fileRcvHandler id : %d \n", id)
-				close(chn)
-				return
+			if s.datachannels[i].isclosed {
+				openchans -= 1
 			} else {
-				panic(fmt.Errorf("uanble to read data from conn id : %d \n %w", id, err))
+				d := <-s.datachannels[i].channel
+				file.Write(d)
 			}
 		}
-		chn <- data[:n]
-		if iscompleted {
-			return
+		if openchans == 0 {
+			return nil
 		}
 	}
+
 }
 
-func (s *Server) send() {
-	s.handlerChans = make(map[int]chan []byte)
+func (s *TcpServer) sendForTransfer() error {
+	fmt.Println("starting send for transfer")
+	s.synContext = &synContext{}
+	s.datachannels = make(map[int]*dataChannel)
 	for i := 0; i < parallelpage; i++ {
 		conn, err := net.Dial("tcp", s.addr)
 		if err != nil {
-			panic(fmt.Errorf(" unable to create connection id : %d \n %w", i, err))
+			return fmt.Errorf("unable to create a connection id :%d \n %w", i, err)
 		}
-		chn := make(chan []byte)
-		s.handlerChans[i] = chn
-		go s.sendHandler(i, conn, chn)
-	}
-
-	file, _ := os.Open(infile)
-	filereader := bufio.NewReaderSize(file, 2*chunk)
-	readcompleted := false
-	chanclosed := make(map[int]bool)
-	closedchans := 0
-	for i := 0; i < parallelpage; i++ {
-		chanclosed[i] = false
-	}
-	for {
-		for i := 0; i < parallelpage; i++ {
-			if readcompleted == true && chanclosed[i] == false {
-				closedchans += 1
-				close(s.handlerChans[i])
-				chanclosed[i] = true
-				continue
-			}
-			data := make([]byte, chunk)
-			n, err := io.ReadFull(filereader, data)
-			//fmt.Println(i, data, string(data))
-			if err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					readcompleted = true
-				}
-			}
-			s.handlerChans[i] <- data[:n]
-
+		s.synContext.wg.Add(1)
+		s.datachannels[i] = &dataChannel{
+			fromaddr: conn.RemoteAddr().String(),
+			isclosed: false,
+			channel:  make(chan []byte),
 		}
-		if closedchans == parallelpage {
-			time.Sleep(time.Minute)
-			return
-		}
+		go s.sendHandler(i, conn, s.datachannels[i])
 	}
+	err := s.sendfile()
+	s.synContext.wg.Wait()
+	return err
 }
 
-func (s *Server) sendHandler(id int, con net.Conn, chn chan []byte) {
-	fmt.Printf("starting sendHanlder id : %d \n", id)
+func (s *TcpServer) sendHandler(id int, conn net.Conn, dataChan *dataChannel) {
+	defer s.synContext.wg.Done()
+	fmt.Printf("starting send Handler id: %d \n", id)
+	for data := range dataChan.channel {
+		conn.Write(data)
+	}
+	fmt.Printf("got channel close for id:%d \n", id)
+}
+
+func (s *TcpServer) sendfile() error {
+	fmt.Println("starting file send ")
+	file, _ := os.Open(infile)
+	filereader := bufio.NewReaderSize(file, 2*chunk)
 	for {
-		data := <-chn
-		//fmt.Printf("data about to be sent %s \n ", string(data))
-		con.Write(data)
+		isreadcompleted := false
+		for i := 0; i < parallelpage; i++ {
+			data := make([]byte, chunk)
+			n, err := io.ReadFull(filereader, data)
+			if err != nil {
+				if err == io.EOF {
+					isreadcompleted = true
+					break
+				} else {
+					if err == io.ErrUnexpectedEOF {
+						isreadcompleted = true
+					} else {
+						return fmt.Errorf("unable to read data from file %w", err)
+					}
+				}
+			}
+			s.datachannels[i].channel <- data[:n]
+		}
+		if isreadcompleted == true {
+			for _, val := range s.datachannels {
+				val.isclosed = true
+				close(val.channel)
+			}
+			return nil
+		}
 	}
 }
 
@@ -149,11 +182,19 @@ func main() {
 	transferType := os.Args[1]
 	addr := os.Args[2]
 	if transferType == "-send" {
-		s := &Server{addr: addr}
-		s.send()
+		s := &TcpServer{addr: addr}
+		err := s.sendForTransfer()
+		if err != nil {
+			panic(fmt.Errorf("error occured while sending file \n %w", err))
+		}
+		fmt.Printf("file sent succesfully \n")
 	} else if transferType == "-listen" {
-		s := &Server{addr: addr}
-		s.Listen()
+		s := &TcpServer{addr: addr}
+		err := s.ListenForTransfer()
+		if err != nil {
+			panic(fmt.Errorf("error occured while listening for transfer \n %w", err))
+		}
+		fmt.Println("file received succesfully ")
 	}
 
 }
