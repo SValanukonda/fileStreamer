@@ -29,6 +29,33 @@ file is read is chunck and each chunk will be sent to connection with  equation 
 
 ## Workings 
 
-The __chunk size, parallelism level, input file, and output file are hardcoded to simplify configuration and avoid unnecessary complexity__. Additionally, __we do not use encoding, serialization, or compression—the file is read as raw bytes and directly transferred to the client__. This minimizes processing overhead and ensures faster data transmission. By leveraging parallel TCP connections, the system efficiently handles large file transfers, improving speed at the cost of higher network bandwidth usage. This design is ideal for scenarios where performance is critical and configuration flexibility is not a primary concern.
+The __chunk size, parallelism level, input file, and output file are read from config.json to avoid unnecessary complexity__. Additionally, __we do not use encoding, serialization, or compression—the file is read as raw bytes and directly transferred to the client__. This minimizes processing overhead and ensures faster data transmission. By leveraging parallel TCP connections, the system efficiently handles large file transfers, improving speed at the cost of higher network bandwidth usage. This design is ideal for scenarios where performance is critical and configuration flexibility is not a primary concern.
 
+
+## Run Locally
+
+clone repo to local
+``` bash
+git clone https://github.com/SValanukonda/fileStreamer
+```
+
+change directory
+``` bash
+cd fileStreamer
+```
+
+change config params in config.json 
+
+```
+vim config.json
+```
+start listner server, it needs tcp address from config.json
+```
+go run filStreamer.go -listen
+```
+
+start Sender Server 
+```
+go run fileStreamer.go -send
+```
 
