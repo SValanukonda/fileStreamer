@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -9,15 +10,20 @@ import (
 	"sync"
 )
 
-const infile = "./in.txt"
-const outfile = "./out.txt"
-const parallelpage = 1
-const chunk = 500 * 1024 * 1024
+type Config struct {
+	ServerAddr   string `json:"serverAddr"`
+	InputFile    string `json:"inputFile"`
+	OutputFile   string `json:"outputFile"`
+	ParallelPage int    `json:"parallelpage"`
+	Chunk        int    `json:"chunk"`
+	ClientAddr   string `json:"clientAddr"`
+}
 
 type TcpServer struct {
 	addr         string
 	datachannels map[int]*dataChannel
 	synContext   *synContext
+	config       *Config
 }
 
 type dataChannel struct {
@@ -31,15 +37,36 @@ type synContext struct {
 	mutex sync.Mutex
 }
 
+func (s *TcpServer) LoadConfig(filename string) (*Config, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open config file: %w", err)
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	config := &Config{}
+	if err := decoder.Decode(config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	return config, nil
+}
+
 func (s *TcpServer) ListenForTransfer() error {
 	fmt.Println("listening for file transfer ")
+	config, err := s.LoadConfig("./config.json")
+	if err != nil {
+		panic(fmt.Errorf("unable to read config files \n %w", err))
+	}
+	s.addr = config.ServerAddr
+	s.config = config
 	ln, err := net.Listen("tcp", s.addr)
 	s.synContext = &synContext{}
 	s.datachannels = make(map[int]*dataChannel)
 	if err != nil {
 		return fmt.Errorf("unable to create listner : %w", err)
 	}
-	for i := 0; i < parallelpage; i++ {
+	for i := 0; i < s.config.ParallelPage; i++ {
 		conn, err := ln.Accept()
 		if err != nil {
 			return fmt.Errorf("unable to accept connnection id :%d \n %w", i, err)
@@ -53,7 +80,6 @@ func (s *TcpServer) ListenForTransfer() error {
 		go s.recvHandler(i, conn, s.datachannels[i])
 	}
 	errf := s.fileWriter()
-	fmt.Printf("awaiting ")
 	s.synContext.wg.Wait()
 	return errf
 }
@@ -61,13 +87,13 @@ func (s *TcpServer) ListenForTransfer() error {
 func (s *TcpServer) recvHandler(id int, conn net.Conn, dataChnl *dataChannel) {
 	fmt.Printf("starting recvHanlder id : %d\n", id)
 	defer s.synContext.wg.Done()
-	buffConn := bufio.NewReaderSize(conn, 2*chunk)
+	buffConn := bufio.NewReaderSize(conn, 2*s.config.Chunk)
 	for {
 		if dataChnl.isclosed {
 			fmt.Printf("channel closed for recv handler id : %d \n", id)
 			return
 		}
-		data := make([]byte, chunk)
+		data := make([]byte, s.config.Chunk)
 		n, err := io.ReadFull(buffConn, data)
 		if err != nil && err != io.ErrUnexpectedEOF {
 			if err == io.EOF {
@@ -93,13 +119,13 @@ func (s *TcpServer) recvHandler(id int, conn net.Conn, dataChnl *dataChannel) {
 
 func (s *TcpServer) fileWriter() error {
 	fmt.Println("starting file writer process ")
-	file, err := os.Create(outfile)
+	file, err := os.Create(s.config.OutputFile)
 	if err != nil {
 		return fmt.Errorf("unable to open file for writing \n %w", err)
 	}
 	for {
-		openchans := parallelpage
-		for i := 0; i < parallelpage; i++ {
+		openchans := s.config.ParallelPage
+		for i := 0; i < s.config.ParallelPage; i++ {
 			if s.datachannels[i].isclosed {
 				openchans -= 1
 			} else {
@@ -116,9 +142,15 @@ func (s *TcpServer) fileWriter() error {
 
 func (s *TcpServer) sendForTransfer() error {
 	fmt.Println("starting send for transfer")
+	config, err := s.LoadConfig("./config.json")
+	if err != nil {
+		panic(fmt.Errorf("unable to read config files \n %w", err))
+	}
+	s.config = config
+	s.addr = s.config.ClientAddr
 	s.synContext = &synContext{}
 	s.datachannels = make(map[int]*dataChannel)
-	for i := 0; i < parallelpage; i++ {
+	for i := 0; i < s.config.ParallelPage; i++ {
 		conn, err := net.Dial("tcp", s.addr)
 		if err != nil {
 			return fmt.Errorf("unable to create a connection id :%d \n %w", i, err)
@@ -131,9 +163,9 @@ func (s *TcpServer) sendForTransfer() error {
 		}
 		go s.sendHandler(i, conn, s.datachannels[i])
 	}
-	err := s.sendfile()
+	errr := s.sendfile()
 	s.synContext.wg.Wait()
-	return err
+	return errr
 }
 
 func (s *TcpServer) sendHandler(id int, conn net.Conn, dataChan *dataChannel) {
@@ -147,12 +179,12 @@ func (s *TcpServer) sendHandler(id int, conn net.Conn, dataChan *dataChannel) {
 
 func (s *TcpServer) sendfile() error {
 	fmt.Println("starting file send ")
-	file, _ := os.Open(infile)
-	filereader := bufio.NewReaderSize(file, 2*chunk)
+	file, _ := os.Open(s.config.InputFile)
+	filereader := bufio.NewReaderSize(file, 2*s.config.Chunk)
 	for {
 		isreadcompleted := false
-		for i := 0; i < parallelpage; i++ {
-			data := make([]byte, chunk)
+		for i := 0; i < s.config.ParallelPage; i++ {
+			data := make([]byte, s.config.Chunk)
 			n, err := io.ReadFull(filereader, data)
 			if err != nil {
 				if err == io.EOF {
@@ -180,16 +212,15 @@ func (s *TcpServer) sendfile() error {
 
 func main() {
 	transferType := os.Args[1]
-	addr := os.Args[2]
 	if transferType == "-send" {
-		s := &TcpServer{addr: addr}
+		s := &TcpServer{}
 		err := s.sendForTransfer()
 		if err != nil {
 			panic(fmt.Errorf("error occured while sending file \n %w", err))
 		}
 		fmt.Printf("file sent succesfully \n")
 	} else if transferType == "-listen" {
-		s := &TcpServer{addr: addr}
+		s := &TcpServer{}
 		err := s.ListenForTransfer()
 		if err != nil {
 			panic(fmt.Errorf("error occured while listening for transfer \n %w", err))

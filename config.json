@@ -1,0 +1,10 @@
+{
+"ServerAddr":"127.0.0.1:8080",
+"InputFile":"./in.txt",
+"ParallelPage":5,
+"Chunk":1024,
+"ClientAddr":"127.0.0.1:8080",
+"OutputFile":"./out.txt"
+}
+
+ 
